@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+    <style>
+        /* Basic styles for modal */
+        .modal {
+            display: none; 
+            position: fixed; 
+            z-index: 1; 
+            left: 0;
+            top: 0;
+            width: 100%; 
+            height: 100%; 
+            overflow: auto; 
+            background-color: rgb(0,0,0);
+            background-color: rgba(0,0,0,0.4); 
+            padding-top: 60px; 
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto; 
+            padding: 20px;
+            border: 1px solid #888;
+            width: 80%; 
+        }
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+        }
+        .close:hover,
+        .close:focus {
+            color: black;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        #map {
+            height: 800px;
+        }
+        #user-info {
+            padding: 10px;
+            background: white;
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="user-info">
+        <h1>Hello, <span id="current-user-name">User</span>!</h1>
+        <button id="ping-button">Ping Location</button>
+    </div>
+    
+    <!-- Modal Structure -->
+    <div id="user-modal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2>User Information</h2>
+            <p>Name: <input type="text" id="modal-name" placeholder="Enter your name" /></p>
+            <p>Distance traveled: <span id="modal-distance">0</span> meters</p>
+            <button id="update-name-button">Update Name</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script>
+        const socket = io();
+        const markers = {};
+        let map;
+        let totalDistance = 0;
+        let lastCoords = null;
+        let userName = 'User';
+
+        function initializeMap(latitude, longitude) {
+            map = L.map('map').setView([latitude, longitude], 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                maxZoom: 19
+            }).addTo(map);
+        }
+
+        function calculateDistance(coord1, coord2) {
+            const R = 6371e3; // Radius of the Earth in meters
+            const lat1 = coord1.latitude * Math.PI / 180;
+            const lat2 = coord2.latitude * Math.PI / 180;
+            const deltaLat = (coord2.latitude - coord1.latitude) * Math.PI / 180;
+            const deltaLon = (coord2.longitude - coord1.longitude) * Math.PI / 180;
+
+            const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+                      Math.cos(lat1) * Math.cos(lat2) *
+                      Math.sin(deltaLon / 2) * Math.sin(deltaLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+            return R * c; // Distance in meters
+        }
+
+        // Initialize geolocation
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition((position) => {
+                const { latitude, longitude } = position.coords;
+                initializeMap(latitude, longitude);
+
+                socket.emit('send-location', { coords: { latitude, longitude }, name: userName });
+
+                navigator.geolocation.watchPosition((position) => {
+                    const { latitude, longitude } = position.coords;
+
+                    if (lastCoords) {
+                        const distance = calculateDistance(lastCoords, { latitude, longitude });
+                        totalDistance += distance;
+                        document.getElementById('modal-distance').innerText = totalDistance.toFixed(2);
+                    }
+                    lastCoords = { latitude, longitude };
+
+                    socket.emit('send-location', { coords: { latitude, longitude }, name: userName });
+                }, (error) => {
+                    console.error(error);
+                }, {
+                    enableHighAccuracy: true,
+                    timeout: 5000,
+                    maximumAge: 0,
+                });
+            }, (error) => {
+                console.error("Error getting location: ", error);
+                alert("Unable to retrieve your location.");
+            });
+        } else {
+            alert("Geolocation is not supported by this browser.");
+        }
+
+        socket.on('receive-location', (data) => {
+            const { id, coords, name } = data;
+
+            if (markers[id]) {
+                markers[id].setLatLng([coords.latitude, coords.longitude]);
+                markers[id].bindPopup(name).openPopup();
+            } else {
+                markers[id] = L.marker([coords.latitude, coords.longitude])
+                    .addTo(map)
+                    .bindPopup(name)
+                    .on('click', () => openModal(name, totalDistance)); // Open modal on marker click
+            }
+        });
+
+        socket.on('remove-marker', (id) => {
+            if (markers[id]) {
+                map.removeLayer(markers[id]);
+                delete markers[id];
+            }
+        });
+
+        document.getElementById('ping-button').addEventListener('click', () => {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    const { latitude, longitude } = position.coords;
+                    socket.emit('send-location', { coords: { latitude, longitude }, name: userName });
+                });
+            }
+        });
+
+        document.getElementById('update-name-button').addEventListener('click', () => {
+            const nameInput = document.getElementById('modal-name').value;
+            if (nameInput) {
+                userName = nameInput;
+                document.getElementById('current-user-name').innerText = userName; // Update the greeting
+                if (lastCoords) {
+                    socket.emit('send-location', { coords: lastCoords, name: userName });
+                }
+            }
+            closeModal();
+        });
+
+        // Modal functions
+        const modal = document.getElementById("user-modal");
+        const span = document.getElementsByClassName("close")[0];
+
+        function openModal(name, distance) {
+            document.getElementById('modal-name').value = name; // Set the current name in the input
+            document.getElementById('modal-distance').innerText = distance.toFixed(2); // Set the distance
+            modal.style.display = "block"; // Show the modal
+        }
+
+        function closeModal() {
+            modal.style.display = "none"; // Hide the modal
+        }
+
+        span.onclick = closeModal;
+        window.onclick = function(event) {
+            if (event.target == modal) {
+                closeModal();
+            }
+        };
+
+        // Set initial user name in the greeting
+        document.getElementById('current-user-name').innerText = userName;
+    </script>
+</body>
+</html>
